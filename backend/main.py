@@ -23,6 +23,7 @@ app.add_middleware(
 # Global variable to store the model
 model = None
 
+
 class ImageRequest(BaseModel):
     image: str
 
@@ -30,14 +31,13 @@ class ImageRequest(BaseModel):
 async def load_model():
     global model
     try:
-        # Load your Teachable Machine model
-        # Update the path to your model
         model = tf.keras.models.load_model('models/model.h5')
         print("✅ Model loaded successfully!")
-        print(model.sumarry())
+        print(model.summary())
     except Exception as e:
         print(f"❌ Failed to load model: {e}")
         model = None
+
 
 @app.get("/model-status")
 async def model_status():
