@@ -6,5 +6,7 @@ Install this version of python since the newer version does not compatible for t
 
 `pip install --upgrade typing_extensions` since the current version of the typing_extensions package does not include the symbol TypeIs.
 
+`pip install opencv-python pillow`
+
 # Run the frontend
 `flutter run -d web-server`
