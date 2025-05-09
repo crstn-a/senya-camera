@@ -17,6 +17,17 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+        fontFamily: 'Roboto',
+        cardTheme: CardTheme(
+          elevation: 4,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(15),
+          ),
+          margin: const EdgeInsets.all(10),
+        ),
+      ),
       home: SpellItScreen(),
     );
   }
@@ -36,16 +47,17 @@ class _SpellItScreenState extends State<SpellItScreen> {
   Timer? _predictionTimer;
   bool isModelReady = false;
   bool isConnectingToAPI = false;
+  bool _showInstructions = false;
 
-  // API endpoint
-  final String apiEndpoint = 'http://127.0.0.1:8000'; // Change to your actual API endpoint
+  final String apiEndpoint = 'http://127.0.0.1:8000';
 
-  // Target Word for Fingerspelling
-  String targetWord = "apple";
+  List<String> targetWords = ["apple", "banana", "cherry", "pineapple", "papaya"];
+  int currentWordIndex = 0;
   int currentLetterIndex = 0;
   List<bool> correctLetters = [];
+  String? lastIncorrectPrediction;
+  bool isWordCompleted = false;
   
-  // Error tracking
   String errorMessage = '';
   int connectionRetries = 0;
   final int maxRetries = 3;
@@ -53,46 +65,38 @@ class _SpellItScreenState extends State<SpellItScreen> {
   @override
   void initState() {
     super.initState();
-    correctLetters = List.filled(targetWord.length, false);
+    correctLetters = List.filled(targetWords[currentWordIndex].length, false);
+    currentLetterIndex = 0;
     _checkModelStatus();
     _initializeCamera();
   }
 
   Future<void> _checkModelStatus() async {
-  setState(() {
-    isConnectingToAPI = true;
-    errorMessage = '';
-  });
-  
-  try {
-    final response = await http.get(Uri.parse('$apiEndpoint/model-status'))
-        .timeout(const Duration(seconds: 5));
+    setState(() {
+      isConnectingToAPI = true;
+      errorMessage = '';
+    });
     
-    if (response.statusCode == 200) {
-      final responseBody = response.body;
-      debugPrint("Raw response: $responseBody");
+    try {
+      final response = await http.get(Uri.parse('$apiEndpoint/model-status'))
+          .timeout(const Duration(seconds: 5));
       
-      final data = jsonDecode(responseBody);
-      debugPrint("Decoded data: $data");
-      debugPrint("model_loaded value: ${data['model_loaded']}");
-      
-      setState(() {
-        isModelReady = data['model_loaded'] == true; // Explicit comparison
-        isConnectingToAPI = false;
-        connectionRetries = 0;
-        
-        // Debug message
-        debugPrint("isModelReady set to: $isModelReady");
-      });
-    } else {
-      _handleConnectionError("Server error: ${response.statusCode}");
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() {
+          isModelReady = data['model_loaded'] == true;
+          isConnectingToAPI = false;
+          connectionRetries = 0;
+        });
+      } else {
+        _handleConnectionError("Server error: ${response.statusCode}");
+      }
+    } on TimeoutException {
+      _handleConnectionError("Connection timeout");
+    } catch (e) {
+      _handleConnectionError("Error checking model status: $e");
     }
-  } on TimeoutException {
-    _handleConnectionError("Connection timeout");
-  } catch (e) {
-    _handleConnectionError("Error checking model status: $e");
   }
-}
   
   void _handleConnectionError(String message) {
     connectionRetries++;
@@ -102,11 +106,7 @@ class _SpellItScreenState extends State<SpellItScreen> {
       errorMessage = message;
     });
     
-    debugPrint("❌ $message (Attempt $connectionRetries of $maxRetries)");
-    
-    // Try again if under max retries
     if (connectionRetries < maxRetries) {
-      debugPrint("Retrying connection in 3 seconds...");
       Future.delayed(const Duration(seconds: 3), _checkModelStatus);
     }
   }
@@ -128,8 +128,6 @@ class _SpellItScreenState extends State<SpellItScreen> {
       setState(() {
         isCameraInitialized = true;
       });
-
-      // Start automatic prediction every 3 seconds
       _startAutomaticPrediction();
     }).catchError((e) {
       debugPrint("Error accessing camera: $e");
@@ -140,22 +138,18 @@ class _SpellItScreenState extends State<SpellItScreen> {
   }
 
   void _startAutomaticPrediction() {
-    _predictionTimer?.cancel(); // Cancel existing timer if any
+    _predictionTimer?.cancel();
     _predictionTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
-      _captureFrameAndPredict();
+      if (!isWordCompleted) {
+        _captureFrameAndPredict();
+      }
     });
   }
 
   Future<void> _captureFrameAndPredict() async {
-    if (!isModelReady) {
-      // Only check model status if we're not already connecting
-      if (!isConnectingToAPI) {
-        await _checkModelStatus();
-      }
-      if (!isModelReady) {
-        debugPrint("⚠️ Waiting for model to load...");
-        return;
-      }
+    if (!isModelReady || isWordCompleted) {
+      if (!isConnectingToAPI) await _checkModelStatus();
+      return;
     }
 
     final canvas = web.HTMLCanvasElement();
@@ -163,7 +157,6 @@ class _SpellItScreenState extends State<SpellItScreen> {
     canvas.height = 224;
     final ctx = canvas.getContext('2d') as web.CanvasRenderingContext2D;
 
-    // Attempt to draw the video frame to the canvas
     try {
       ctx.drawImage(_videoElement, 0, 0, canvas.width, canvas.height);
     } catch (e) {
@@ -171,7 +164,6 @@ class _SpellItScreenState extends State<SpellItScreen> {
       return;
     }
     
-    // Convert canvas to base64
     final base64Image = canvas.toDataURL('image/jpeg').split(',')[1];
     
     setState(() {
@@ -179,7 +171,6 @@ class _SpellItScreenState extends State<SpellItScreen> {
     });
     
     try {
-      // Send the image to the FastAPI backend
       final response = await http.post(
         Uri.parse('$apiEndpoint/predict-base64'),
         headers: {'Content-Type': 'application/json'},
@@ -188,129 +179,323 @@ class _SpellItScreenState extends State<SpellItScreen> {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        final letter = data['letter'];
-        final confidence = data['confidence'];
-
         setState(() {
-          predictedLabel = '$letter (${(confidence * 100).toStringAsFixed(2)}%)';
+          predictedLabel = '${data['letter']} (${(data['confidence'] * 100).toStringAsFixed(2)}%)';
           errorMessage = '';
-          _checkUserInput(letter);
+          if (!isWordCompleted) {
+            _checkUserInput(data['letter']);
+          }
         });
       } else {
         setState(() {
           predictedLabel = 'Error';
           errorMessage = "API Error: ${response.statusCode}";
         });
-        debugPrint("❌ API Error: ${response.statusCode} - ${response.body}");
       }
     } on TimeoutException {
       setState(() {
         predictedLabel = 'Timeout';
         errorMessage = "API request timed out";
       });
-      debugPrint("❌ API request timed out");
     } catch (e) {
       setState(() {
         predictedLabel = 'Error';
         errorMessage = "Connection error";
       });
-      debugPrint("❌ API Connection Error: $e");
     }
   }
 
   void _checkUserInput(String recognizedLetter) {
-    if (recognizedLetter.isEmpty || currentLetterIndex >= targetWord.length) {
+    if (recognizedLetter.isEmpty || isWordCompleted || currentLetterIndex >= targetWords[currentWordIndex].length) {
       return;
     }
 
     setState(() {
-      if (recognizedLetter.toLowerCase() == targetWord[currentLetterIndex]) {
+      final currentLetter = targetWords[currentWordIndex][currentLetterIndex].toLowerCase();
+      final predictedLetter = recognizedLetter.toLowerCase();
+      
+      if (predictedLetter == currentLetter) {
         correctLetters[currentLetterIndex] = true;
-        currentLetterIndex++; // Move to next letter
-        
-        // Check if the word is complete
-        if (currentLetterIndex >= targetWord.length) {
-          _predictionTimer?.cancel(); // Stop predictions when word is complete
-          // Show success message
+        currentLetterIndex++;
+        lastIncorrectPrediction = null;
+
+        if (currentLetterIndex >= targetWords[currentWordIndex].length) {
+          isWordCompleted = true;
+          _predictionTimer?.cancel();
+
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Congratulations! You spelled the word correctly!'),
+              content: Text('Excellent! You spelled "${targetWords[currentWordIndex]}" correctly!'),
               backgroundColor: Colors.green,
+              duration: const Duration(seconds: 3),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
             ),
           );
+
+          Future.delayed(const Duration(seconds: 3), () {
+            if (currentWordIndex < targetWords.length - 1) {
+              setState(() {
+                currentWordIndex++;
+                currentLetterIndex = 0;
+                correctLetters = List.filled(targetWords[currentWordIndex].length, false);
+                lastIncorrectPrediction = null;
+                isWordCompleted = false;
+                predictedLabel = '';
+              });
+              _startAutomaticPrediction();
+              
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Next word: "${targetWords[currentWordIndex]}"'),
+                  backgroundColor: Colors.blue,
+                  duration: const Duration(seconds: 2),
+                  behavior: SnackBarBehavior.floating,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+              );
+            } else {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: const Text('Congratulations! You completed all words!'),
+                  backgroundColor: Colors.green,
+                  duration: const Duration(seconds: 4),
+                  behavior: SnackBarBehavior.floating,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+              );
+            }
+          });
         }
+      } else {
+        lastIncorrectPrediction = predictedLetter;
       }
     });
   }
 
   Widget _buildWordDisplay() {
-    return Row(
+    int totalLetters = targetWords.fold(0, (sum, word) => sum + word.length);
+    int completedLetters = 0;
+    for (int wordIndex = 0; wordIndex < currentWordIndex; wordIndex++) {
+      completedLetters += targetWords[wordIndex].length;
+    }
+    completedLetters += correctLetters.where((e) => e).length;
+
+    double overallProgress = completedLetters / totalLetters;
+
+    final displayIndex = currentLetterIndex < targetWords[currentWordIndex].length
+        ? currentLetterIndex
+        : targetWords[currentWordIndex].length - 1;
+
+    return Column(
       mainAxisAlignment: MainAxisAlignment.center,
-      children: targetWord.split('').asMap().entries.map((entry) {
-        int index = entry.key;
-        String letter = entry.value;
+      children: [
+        Text(
+          'Word ${currentWordIndex + 1} of ${targetWords.length}',
+          style: const TextStyle(fontSize: 16, color: Colors.grey, fontWeight: FontWeight.w500),
+        ),
+        const SizedBox(height: 10),
 
-        Color color;
-        if (index < currentLetterIndex) {
-          color = Colors.green; // Correctly spelled letters
-        } else if (index == currentLetterIndex) {
-          color = Colors.blue; // Current letter to spell
-        } else {
-          color = Colors.grey; // Upcoming letters
-        }
-
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 5),
-          child: Text(
-            letter.toUpperCase(),
-            style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: color),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: LinearProgressIndicator(
+              value: overallProgress,
+              minHeight: 10,
+              backgroundColor: Colors.orange.shade100,
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.orange),
+            ),
           ),
-        );
-      }).toList(),
+        ),
+
+        const SizedBox(height: 10),
+
+        Wrap(
+          alignment: WrapAlignment.center,
+          spacing: 12,
+          runSpacing: 12,
+          children: targetWords[currentWordIndex].split('').asMap().entries.map((entry) {
+            int index = entry.key;
+            String letter = entry.value;
+            String currentLetter = targetWords[currentWordIndex][displayIndex].toLowerCase();
+
+            Color color;
+            if (index < displayIndex) {
+              color = Colors.green;
+            } else if (index == displayIndex) {
+              color = (lastIncorrectPrediction != null &&
+                      lastIncorrectPrediction!.isNotEmpty &&
+                      lastIncorrectPrediction != currentLetter)
+                  ? Colors.red
+                  : Colors.blue;
+            } else {
+              color = Colors.grey;
+            }
+
+            return Container(
+              width: 50,
+              height: 50,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: color, width: 2),
+                boxShadow: [
+                  BoxShadow(
+                    color: color.withOpacity(0.2),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Text(
+                letter.toUpperCase(),
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ],
     );
   }
 
   Widget _buildInstructionCard() {
     return Card(
       margin: const EdgeInsets.all(16),
-      elevation: 2,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Instructions:',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '1. Position your hand in the camera view',
-              style: TextStyle(fontSize: 16),
-            ),
-            Text(
-              '2. Form the ASL sign for the highlighted letter',
-              style: TextStyle(fontSize: 16),
-            ),
-            Text(
-              '3. Hold the sign steady for a moment',
-              style: TextStyle(fontSize: 16),
-            ),
-            Text(
-              '4. Continue until you spell the entire word',
-              style: TextStyle(fontSize: 16),
-            ),
-          ],
+      elevation: 4,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(15),
+      ),
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Colors.blue.shade50,
+              Colors.white,
+            ],
+          ),
+          borderRadius: BorderRadius.circular(15),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'How to Play',
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blue,
+                ),
+              ),
+              const SizedBox(height: 16),
+              _buildInstructionStep(
+                '1',
+                'Position Your Hand',
+                'Make sure your hand is clearly visible in the camera view',
+                Icons.videocam,
+              ),
+              _buildInstructionStep(
+                '2',
+                'Form the ASL Sign',
+                'Show the sign for the highlighted letter in the word',
+                Icons.fingerprint,
+              ),
+              _buildInstructionStep(
+                '3',
+                'Hold Steady',
+                'Maintain the sign for a moment to allow recognition',
+                Icons.timer,
+              ),
+              _buildInstructionStep(
+                '4',
+                'Continue Spelling',
+                'Repeat for each letter until the word is complete',
+                Icons.spellcheck,
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
-  
+
+  Widget _buildInstructionStep(String number, String title, String description, IconData icon) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(
+              color: Colors.blue,
+              shape: BoxShape.circle,
+            ),
+            child: Center(
+              child: Text(
+                number,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(icon, size: 20, color: Colors.blue),
+                    const SizedBox(width: 8),
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  description,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.grey.shade700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildErrorDisplay() {
-    if (errorMessage.isEmpty) return SizedBox.shrink();
+    if (errorMessage.isEmpty) return const SizedBox.shrink();
     
     return Container(
-      margin: const EdgeInsets.all(16),
+      margin: const EdgeInsets.only(top: 16),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.red.withOpacity(0.1),
@@ -319,7 +504,7 @@ class _SpellItScreenState extends State<SpellItScreen> {
       ),
       child: Row(
         children: [
-          Icon(Icons.error_outline, color: Colors.red),
+          const Icon(Icons.error_outline, color: Colors.red),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -341,145 +526,166 @@ class _SpellItScreenState extends State<SpellItScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
         backgroundColor: Colors.white,
-        elevation: 0,
-        title: Text('ASL Spelling Game'),
+        elevation: 1,
+        title: const Text(
+          'Senya Spelling Game',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: Colors.orange,
+          ),
+        ),
+        centerTitle: true,
+        // In your app bar actions:
         actions: [
-          // Model status indicator
-          Container(
-            margin: const EdgeInsets.only(right: 16),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            decoration: BoxDecoration(
-              color: isModelReady ? Colors.green.withOpacity(0.2) : 
-                    isConnectingToAPI ? Colors.orange.withOpacity(0.2) : 
-                    Colors.red.withOpacity(0.2),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Row(
-              children: [
-                if (isConnectingToAPI) 
-                  SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.orange),
+          IconButton(
+            icon: const Icon(Icons.info_outline),
+            onPressed: () {
+              showDialog(
+                context: context,
+                builder: (context) => Center(
+                  child: SizedBox(
+                    width: 600, // Square width
+                    height: 400, // Square height
+                    child: Card(
+                      elevation: 4,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                      child: _buildInstructionCard(),
                     ),
-                  )
-                else
-                  Icon(
-                    isModelReady ? Icons.check_circle : Icons.warning,
-                    size: 16,
-                    color: isModelReady ? Colors.green : Colors.red,
                   ),
-                SizedBox(width: 4),
-                Text(
-                  isModelReady ? "Model Ready" : 
-                  isConnectingToAPI ? "Connecting..." : 
-                  "Not Connected",
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: isModelReady ? Colors.green[800] : 
-                          isConnectingToAPI ? Colors.orange[800] : 
-                          Colors.red[800],
-                  ),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+      body: Center(
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 1200),
+          padding: const EdgeInsets.all(16.0),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (_showInstructions) ...[
+                  _buildInstructionCard(),
+                  const SizedBox(height: 20),
+                ],
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Left Column - Camera View
+                    Flexible(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 600),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Card(
+                              elevation: 4,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Container(
+                                height: 400,
+                                width: 500,
+                                decoration: BoxDecoration(
+                                  color: Colors.grey[300],
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(
+                                    color: isModelReady ? Colors.green : Colors.grey,
+                                    width: 2,
+                                  ),
+                                ),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(18),
+                                  child: isCameraInitialized
+                                      ? const HtmlElementView(viewType: 'webcamVideo')
+                                      : const Center(
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              CircularProgressIndicator(),
+                                              SizedBox(height: 16),
+                                              Text(
+                                                "Initializing camera...",
+                                                style: TextStyle(color: Colors.grey),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                              decoration: BoxDecoration(
+                                color: Colors.blue.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(color: Colors.blue.shade200),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.lightbulb_outline,
+                                    color: Colors.blue.shade700,
+                                    size: 20,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'Current prediction: $predictedLabel',
+                                    style: TextStyle(
+                                      color: Colors.blue.shade700,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            _buildErrorDisplay(),
+                          ],
+                        ),
+                      ),
+                    ),
+                    
+                    const SizedBox(width: 40),
+                    
+                    // Right Column - Word Display
+                    Flexible(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 500),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Card(
+                              elevation: 4,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Container(  // Added Container with fixed dimensions
+                                height: 400,    // Matches camera height
+                                width: 500,     // Matches camera width
+                                padding: const EdgeInsets.all(20.0),
+                                child: _buildWordDisplay(),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
-          // Refresh button
-          IconButton(
-            icon: Icon(Icons.refresh),
-            color: Colors.blue,
-            onPressed: _checkModelStatus,
-          ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        child: Column(
-          children: [
-            const SizedBox(height: 20),
-            Text(
-              'Spell the word:',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 10),
-            _buildWordDisplay(),
-            const SizedBox(height: 20),
-            
-            // Camera View
-            Container(
-              width: 240,
-              height: 240,
-              decoration: BoxDecoration(
-                color: Colors.grey[300],
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(
-                  color: isModelReady ? Colors.green : Colors.grey,
-                  width: 2,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.1),
-                    blurRadius: 10,
-                    offset: Offset(0, 5),
-                  ),
-                ],
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(18),
-                child: isCameraInitialized
-                    ? const HtmlElementView(viewType: 'webcamVideo')
-                    : const Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            CircularProgressIndicator(),
-                            SizedBox(height: 16),
-                            Text("Initializing camera..."),
-                          ],
-                        ),
-                      ),
-              ),
-            ),
-            
-            const SizedBox(height: 16),
-            
-            // Prediction display
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.blue.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.blue.shade200),
-              ),
-              child: Text(
-                'Current prediction: $predictedLabel',
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.blue.shade700,
-                ),
-              ),
-            ),
-            
-            // Error message if any
-            _buildErrorDisplay(),
-            
-            // Instructions
-            _buildInstructionCard(),
-            
-            const SizedBox(height: 20),
-          ],
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _captureFrameAndPredict,
-        tooltip: 'Capture and Predict',
-        child: Icon(Icons.camera),
       ),
     );
   }
