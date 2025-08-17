@@ -1,6 +1,7 @@
 # Train model
 Download model `asl fingerspelling` datasets from kaggle
-\nTrain datasets to `teachable machine with google` then save the trained model as .h5
+
+Train datasets to `teachable machine with google` then save the trained model as .h5
 
 # python 3.10.1
 Install this version of python since the newer version does not compatible for the loaded models of teachable machine with google
